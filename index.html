@@ -407,7 +407,7 @@ body{min-height:100vh;background:linear-gradient(135deg,var(--bg) 0%,var(--bg2) 
     <button class="btn-back" onclick="show('sLogin')">← กลับ</button>
     <div class="glass" style="margin-bottom:12px">
       <div class="section-title">👥 นักเรียนทั้งหมด</div>
-      <table class="user-table"><thead><tr><th>ชื่อ / username</th><th>XP</th><th>Chapter</th><th></th></tr></thead><tbody id="userTbody"></tbody></table>
+      <table class="user-table"><thead><tr><th>ชื่อ / username</th><th>XP</th><th>ถูก</th><th>Ch</th><th>เข้าล่าสุด</th><th></th></tr></thead><tbody id="userTbody"></tbody></table>
     </div>
     <div class="glass">
       <div class="section-title">➕ เพิ่มนักเรียน</div>
@@ -548,18 +548,23 @@ body{min-height:100vh;background:linear-gradient(135deg,var(--bg) 0%,var(--bg2) 
    ═══════════════════════════════════════════════════════════ */
 const CONFIG = {
   /* Google Sheets */
-  SHEET_ID:          "1U_RM3WXKAduFKDiE2ag2HYepIN-P0XSo7nLxnjGzbb0",  // ← ใส่ Sheet ID
+  SHEET_ID:          "YOUR_SHEET_ID_HERE",  // ← ใส่ Sheet ID
   SHEET_NAME:        "vocab",               // ← ชื่อแท็บ Sheet
 
+  /* Apps Script Backend — วาง URL หลัง Deploy ตรงนี้ */
+  API_URL:           "https://script.google.com/macros/s/AKfycbzXEoAp6_qpLU3rSrS2088hX_DPugKq99d6zUW1lenmNRF1eOxImQvuz5t9REwAmabcPQ/exec",  // ← ใส่ Web App URL
+  TEACHER_USER:      "teacher",
+  TEACHER_PASS:      "vocab2024",  // ← ตรงกับ Code.gs
+
   /* การเล่น */
-  QUESTIONS_PER_ROUND:  60,   // จำนวนข้อต่อรอบ
+  QUESTIONS_PER_ROUND:  10,   // จำนวนข้อต่อรอบ
   PASS_THRESHOLD:       0.80, // % ขั้นต่ำเพื่อผ่าน chapter (0.80 = 80%)
-  BONUS_SET_SIZE:       20,    // จำนวนคู่ต่อชุดใน Bonus chapter
+  BONUS_SET_SIZE:       5,    // จำนวนคู่ต่อชุดใน Bonus chapter
   SHUFFLE_QUEUE:        true, // สุ่มลำดับคำศัพท์ทุกครั้ง
 
   /* ครู */
   TEACHER_USER:      "teacher",
-  TEACHER_PASS:      "ken",  // ← เปลี่ยนรหัสครูได้ตรงนี้
+  TEACHER_PASS:      "vocab2024",  // ← เปลี่ยนรหัสครูได้ตรงนี้
 
   /* เกม */
   GAME_TITLE:        "⚽ VOCAB PACK",
@@ -690,7 +695,7 @@ let vocab=[],chapters={},chapterOrder=[];
 let currentUser=null,db={};
 
 /* ═══ GAME STATE ═══ */
-let activeChapter=null,queue=[],qIdx=0,currentCard=null;
+let activeChapter=null,queue=[],qIdx=0,currentCard=null,sessionStartTime=0;
 let currentChoices=[],correctIdx=0,flipped=false,answered=false;
 let sOk=0,sBad=0,sScore=0,combo=0;
 let currentAudio=null,afterResult=null;
@@ -699,13 +704,68 @@ let currentAudio=null,afterResult=null;
 let bonusDeck=[],bonusBatches=[],bonusBatchIdx=0,bonusOk=0;
 let bSelected={word:null,meaning:null},bMatched=new Set();
 
-/* ═══ LOCAL DB ═══ */
+/* ═══════════════════════════════════════════════════════════
+   API — เรียก Google Apps Script backend
+═══════════════════════════════════════════════════════════ */
+async function api(action, body={}) {
+  const url = CONFIG.API_URL;
+  if (!url || url === "YOUR_APPS_SCRIPT_URL_HERE") {
+    return localFallback(action, body);
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({action, ...body})
+    });
+    return await res.json();
+  } catch(e) {
+    console.warn("API error:", e);
+    return {ok:false, msg:"เชื่อมต่อ server ไม่ได้: "+e.message};
+  }
+}
+
+/* ═══ LOCAL DB + FALLBACK ═══ */
 function loadDB(){try{db=JSON.parse(localStorage.getItem('vocabDB')||'{}');}catch{db={};}if(!db.users)db.users={};}
 function saveDB(){localStorage.setItem('vocabDB',JSON.stringify(db));}
 function usr(){return db.users[currentUser]||{};}
-function setUsr(patch){if(db.users[currentUser])Object.assign(db.users[currentUser],patch);saveDB();}
+function setUsr(patch){
+  if(!db.users[currentUser])db.users[currentUser]={fsrs:{}};
+  Object.assign(db.users[currentUser],patch);saveDB();
+}
 function getFSRS(word){return((usr().fsrs)||{})[word]||FSRS.init();}
-function setFSRS(word,card){const u=db.users[currentUser];if(!u)return;if(!u.fsrs)u.fsrs={};u.fsrs[word]=card;saveDB();}
+function setFSRS(word,card){
+  if(!db.users[currentUser])db.users[currentUser]={fsrs:{}};
+  if(!db.users[currentUser].fsrs)db.users[currentUser].fsrs={};
+  db.users[currentUser].fsrs[word]=card;saveDB();
+}
+function localFallback(action,body){
+  if(action==='login'){
+    const u=db.users[body.username];
+    if(u&&u.password===body.password)return{ok:true,user:{username:body.username,name:u.name||body.username,role:u.role||'student'}};
+    return{ok:false,msg:'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'};
+  }
+  if(action==='getProgress'){
+    const u=db.users[body.username]||{};
+    return{ok:true,sessions:[],summary:{totalXP:u.xp||0,totalCorrect:u.totalCorrect||0,totalSessions:0,chaptersCleared:u.chaptersCleared||[],bonusCleared:u.bonusCleared||[],maxCombo:u.maxCombo||0,lastSession:null}};
+  }
+  if(action==='saveProgress')return{ok:true};
+  if(action==='getUsers'){
+    const users=Object.entries(db.users||{}).filter(([k])=>k!==CONFIG.TEACHER_USER).map(([k,v])=>({username:k,name:v.name||k,role:v.role||'student',created_at:''}));
+    return{ok:true,users};
+  }
+  if(action==='addUser'){
+    if(db.users[body.username])return{ok:false,msg:'username นี้มีอยู่แล้ว'};
+    db.users[body.username]={password:body.password,name:body.name||body.username,role:'student',xp:0,chaptersCleared:[],fsrs:{}};
+    saveDB();return{ok:true,msg:'เพิ่มสำเร็จ (Local)'};
+  }
+  if(action==='deleteUser'){delete db.users[body.username];saveDB();return{ok:true};}
+  if(action==='getDashboard'){
+    const students=Object.entries(db.users||{}).filter(([k,v])=>v.role!=='teacher').map(([k,v])=>({username:k,name:v.name||k,totalSessions:0,totalXP:v.xp||0,totalCorrect:v.totalCorrect||0,chaptersCleared:v.chaptersCleared||[],lastSeen:v.lastDate||null,comboMax:v.maxCombo||0}));
+    return{ok:true,students};
+  }
+  return{ok:false,msg:'Unknown action'};
+}
 
 /* ═══ AUDIO ═══ */
 let _ac;
@@ -741,20 +801,43 @@ function toast(msg,sub,icon='🏆'){const t=document.createElement('div');t.clas
 function show(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');}
 
 /* ═══ AUTH ═══ */
-function doLogin(){
+async function doLogin(){
   const u=document.getElementById('loginUser').value.trim();
   const p=document.getElementById('loginPass').value;
-  const err=document.getElementById('loginErr');
-  const user=db.users[u];
-  if(!user||user.password!==p){err.textContent='ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง';return;}
-  err.textContent='';currentUser=u;updateStreak(u);buildDash();show('sDash');
+  const errEl=document.getElementById('loginErr');
+  const btn=document.querySelector('.btn-primary');
+  if(!u||!p){errEl.textContent='กรุณากรอก username และ password';return;}
+  errEl.textContent='กำลังตรวจสอบ...';errEl.style.color='rgba(255,215,0,.7)';
+  if(btn)btn.disabled=true;
+  const res=await api('login',{username:u,password:p});
+  if(btn)btn.disabled=false;
+  if(!res.ok){errEl.style.color='var(--red)';errEl.textContent=res.msg;return;}
+  errEl.textContent='';
+  currentUser=u;
+  // cache user info locally
+  if(!db.users[u])db.users[u]={fsrs:{}};
+  db.users[u].name=res.user.name;db.users[u].role=res.user.role;
+  saveDB();
+  // load progress from server
+  const prog=await api('getProgress',{username:u});
+  if(prog.ok&&prog.summary){
+    const s=prog.summary;
+    db.users[u].xp=s.totalXP||0;
+    db.users[u].totalCorrect=s.totalCorrect||0;
+    db.users[u].chaptersCleared=s.chaptersCleared||[];
+    db.users[u].bonusCleared=s.bonusCleared||[];
+    db.users[u].maxCombo=s.maxCombo||0;
+    saveDB();
+  }
+  updateStreak(u);buildDash();show('sDash');
 }
 function doLogout(){currentUser=null;if(currentAudio){currentAudio.pause();currentAudio=null;}window.speechSynthesis&&speechSynthesis.cancel();show('sLogin');}
-function promptTeacherLogin(){
+async function promptTeacherLogin(){
   const u=prompt('ชื่อผู้ใช้ครู:');if(!u)return;
   const p=prompt('รหัสผ่านครู:');if(!p)return;
-  if(u===CONFIG.TEACHER_USER&&p===CONFIG.TEACHER_PASS){buildTeacher();show('sTeacher');}
-  else alert('รหัสผ่านไม่ถูกต้อง');
+  if(u===CONFIG.TEACHER_USER&&p===CONFIG.TEACHER_PASS){
+    await buildTeacher();show('sTeacher');
+  } else alert('รหัสผ่านไม่ถูกต้อง');
 }
 function updateStreak(u){
   const user=db.users[u];const today=new Date().toDateString();
@@ -769,25 +852,103 @@ function updateStreak(u){
 }
 
 /* ═══ TEACHER ═══ */
-function buildTeacher(){
+async function buildTeacher(){
   document.getElementById('teacherCodeDisplay').textContent=`${CONFIG.TEACHER_USER} / ${CONFIG.TEACHER_PASS}`;
-  const tb=document.getElementById('userTbody');tb.innerHTML='';
-  Object.entries(db.users).filter(([k])=>k!==CONFIG.TEACHER_USER).forEach(([k,v])=>{
-    tb.innerHTML+=`<tr><td>${v.name||k}<br><small style="color:rgba(255,255,255,.35)">${k}</small></td><td>${v.xp||0}</td><td>${(v.chaptersCleared||[]).length}</td><td><button class="btn-del" onclick="delUser('${k}')">ลบ</button></td></tr>`;
+  const tb=document.getElementById('userTbody');
+  tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:rgba(255,215,0,.5);padding:12px;font-size:12px">กำลังโหลด...</td></tr>';
+  const res=await api('getDashboard',{teacherUser:CONFIG.TEACHER_USER,teacherPass:CONFIG.TEACHER_PASS});
+  if(!res.ok){tb.innerHTML=`<tr><td colspan="6" style="color:var(--red);padding:12px;font-size:12px">${res.msg}</td></tr>`;return;}
+  const students=res.students||[];
+  tb.innerHTML='';
+  students.forEach(s=>{
+    const lastSeen=s.lastSeen?formatDate(s.lastSeen):'ยังไม่เคยเล่น';
+    const chCount=(s.chaptersCleared||[]).length;
+    tb.innerHTML+=`
+      <tr>
+        <td>${s.name||s.username}<br><small style="color:rgba(255,255,255,.35)">${s.username}</small></td>
+        <td style="text-align:center">${s.totalXP||0}</td>
+        <td style="text-align:center">${s.totalCorrect||0}</td>
+        <td style="text-align:center">${chCount}</td>
+        <td style="font-size:11px;color:rgba(255,255,255,.5)">${lastSeen}</td>
+        <td>
+          <button class="btn-del" style="margin-bottom:3px" onclick="showStudentDetail('${s.username}')">📊</button>
+          <button class="btn-del" onclick="delUser('${s.username}')">ลบ</button>
+        </td>
+      </tr>`;
   });
-  if(!tb.innerHTML)tb.innerHTML='<tr><td colspan="4" style="color:rgba(255,255,255,.25);text-align:center;padding:12px;font-size:12px">ยังไม่มีนักเรียน</td></tr>';
+  if(!students.length)tb.innerHTML='<tr><td colspan="6" style="color:rgba(255,255,255,.25);text-align:center;padding:12px;font-size:12px">ยังไม่มีนักเรียน</td></tr>';
 }
-function addUser(){
+
+function formatDate(iso){
+  if(!iso)return'-';
+  try{const d=new Date(iso);return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit',hour:'2-digit',minute:'2-digit'});}
+  catch{return String(iso).slice(0,16);}
+}
+
+async function showStudentDetail(username){
+  const res=await api('getProgress',{username,teacherUser:CONFIG.TEACHER_USER,teacherPass:CONFIG.TEACHER_PASS});
+  if(!res.ok){alert(res.msg);return;}
+  const s=res.summary||{};
+  const sessions=(res.sessions||[]).slice(-10).reverse(); // 10 sessions ล่าสุด
+  let sessionRows=sessions.map(r=>`
+    <tr>
+      <td style="font-size:11px;color:rgba(255,255,255,.5)">${formatDate(r.timestamp)}</td>
+      <td style="font-size:12px">Ch${r.chapter||'?'} ${r.chapterName||''} ${r.mode==='bonus'?'🧩':''}</td>
+      <td style="text-align:center;font-size:12px;color:${r.passed?'var(--green)':'var(--red)'}">${r.correct||0}/${r.total||0}</td>
+      <td style="text-align:center;font-size:12px;color:var(--gold)">${r.xpEarned||0} XP</td>
+    </tr>`).join('');
+  if(!sessionRows)sessionRows='<tr><td colspan="4" style="text-align:center;color:rgba(255,255,255,.3);padding:8px;font-size:12px">ยังไม่มีประวัติ</td></tr>';
+
+  const modal=document.createElement('div');
+  modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:500;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);padding:16px';
+  modal.innerHTML=`
+    <div style="background:linear-gradient(160deg,#1a1a2e,#0f2557);border:2px solid var(--border-gold);border-radius:20px;padding:22px;max-width:480px;width:100%;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div style="font-family:Oswald,sans-serif;font-size:16px;color:var(--gold);letter-spacing:2px">📊 ${username}</div>
+        <button onclick="this.closest('[style*=fixed]').remove()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:20px;cursor:pointer">✕</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">
+        <div class="stat-box"><div class="stat-num">${s.totalXP||0}</div><div class="stat-label">XP รวม</div></div>
+        <div class="stat-box"><div class="stat-num">${s.totalCorrect||0}</div><div class="stat-label">คำที่ถูก</div></div>
+        <div class="stat-box"><div class="stat-num">${s.totalSessions||0}</div><div class="stat-label">ครั้งที่เล่น</div></div>
+        <div class="stat-box"><div class="stat-num">${(s.chaptersCleared||[]).length}</div><div class="stat-label">Ch ผ่าน</div></div>
+        <div class="stat-box"><div class="stat-num">${s.maxCombo||0}</div><div class="stat-label">Combo Max</div></div>
+        <div class="stat-box" style="font-size:11px"><div style="color:var(--text2);margin-top:4px">${s.lastSession?formatDate(s.lastSession):'ยังไม่เคย'}</div><div class="stat-label">เข้าล่าสุด</div></div>
+      </div>
+      <div style="font-family:Oswald,sans-serif;font-size:11px;color:var(--text3);letter-spacing:2px;margin-bottom:8px">10 SESSION ล่าสุด</div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr>
+          <th style="font-size:10px;color:var(--text3);text-align:left;padding:5px 4px;border-bottom:1px solid var(--border);font-family:Oswald,sans-serif;letter-spacing:1px">เวลา</th>
+          <th style="font-size:10px;color:var(--text3);text-align:left;padding:5px 4px;border-bottom:1px solid var(--border);font-family:Oswald,sans-serif;letter-spacing:1px">Chapter</th>
+          <th style="font-size:10px;color:var(--text3);text-align:center;padding:5px 4px;border-bottom:1px solid var(--border);font-family:Oswald,sans-serif;letter-spacing:1px">คะแนน</th>
+          <th style="font-size:10px;color:var(--text3);text-align:center;padding:5px 4px;border-bottom:1px solid var(--border);font-family:Oswald,sans-serif;letter-spacing:1px">XP</th>
+        </tr></thead>
+        <tbody>${sessionRows}</tbody>
+      </table>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click',e=>{if(e.target===modal)modal.remove();});
+}
+async function addUser(){
   const u=document.getElementById('nuUser').value.trim();
   const p=document.getElementById('nuPass').value;
   const n=document.getElementById('nuName').value.trim();
   if(!u||!p){alert('กรุณากรอก username และ password');return;}
-  if(db.users[u]){alert('ชื่อผู้ใช้นี้มีอยู่แล้ว');return;}
-  db.users[u]={password:p,name:n||u,role:'student',xp:0,streak:0,lastDate:'',chaptersCleared:[],fsrs:{},totalCorrect:0,maxCombo:0,bonusPlayed:0};
-  saveDB();buildTeacher();
+  const btn=document.querySelector('.btn-add');
+  if(btn){btn.disabled=true;btn.textContent='กำลังเพิ่ม...';}
+  const res=await api('addUser',{username:u,password:p,name:n||u,role:'student',
+    teacherUser:CONFIG.TEACHER_USER,teacherPass:CONFIG.TEACHER_PASS});
+  if(btn){btn.disabled=false;btn.textContent='+ เพิ่มนักเรียน';}
+  if(!res.ok){alert(res.msg);return;}
   ['nuUser','nuPass','nuName'].forEach(id=>document.getElementById(id).value='');
+  await buildTeacher();
 }
-function delUser(u){if(confirm(`ลบ ${u} ออกจากระบบ?`)){delete db.users[u];saveDB();buildTeacher();}}
+async function delUser(u){
+  if(!confirm(`ลบ ${u} ออกจากระบบ?`))return;
+  const res=await api('deleteUser',{username:u,teacherUser:CONFIG.TEACHER_USER,teacherPass:CONFIG.TEACHER_PASS});
+  if(!res.ok){alert(res.msg);return;}
+  await buildTeacher();
+}
 
 /* ═══ DASHBOARD ═══ */
 function buildDash(){
@@ -900,7 +1061,7 @@ function startChapter(ch){
   let sorted=scored.map(s=>s.w);
   if(CONFIG.SHUFFLE_QUEUE) sorted=shuffle(sorted); // ← สุ่มทุกครั้ง
   queue=sorted.slice(0,CONFIG.QUESTIONS_PER_ROUND);
-  qIdx=0;sOk=0;sBad=0;sScore=0;combo=0;
+  qIdx=0;sOk=0;sBad=0;sScore=0;combo=0;sessionStartTime=Date.now();
   ['gScore','gOk','gBad'].forEach(id=>document.getElementById(id).textContent='0');
   document.getElementById('gChLabel').textContent=`CHAPTER ${ch}: ${words[0]?.chapterName||''}`;
   document.getElementById('gProg').style.width='0%';
@@ -1029,6 +1190,14 @@ function endSession(){
   if(passed&&!(u.chaptersCleared||[]).includes(activeChapter)){if(!u.chaptersCleared)u.chaptersCleared=[];u.chaptersCleared.push(activeChapter);}
   if(pct===1)u.hasPerfect=true;
   checkAllAchievements();saveDB();
+  // บันทึก progress ขึ้น server
+  api('saveProgress',{
+    username:currentUser, chapter:activeChapter,
+    chapterName:queue[0]?.chapterName||'', mode:'mc',
+    score:sScore, correct:sOk, total:queue.length,
+    passed, xpEarned:sOk*10, durationSec:Math.round((Date.now()-sessionStartTime)/1000),
+    comboMax:u.maxCombo||0
+  });
   // modal
   const pctR=Math.round(pct*100);
   document.getElementById('ccTrophy').textContent=passed?pct===1?'🏆':'🎉':'😤';
@@ -1169,13 +1338,34 @@ document.addEventListener('keydown',e=>{
 /* ═══ LOAD VOCAB ═══ */
 async function loadVocab(){
   const id=CONFIG.SHEET_ID.trim();
-  if(id==='YOUR_SHEET_ID_HERE'||!id){setMsg('ใช้คำศัพท์ตัวอย่าง...');await sleep(600);return FALLBACK_VOCAB;}
-  const name=encodeURIComponent(CONFIG.SHEET_NAME);
+  if(id==='YOUR_SHEET_ID_HERE'||!id){setMsg('ใช้คำศัพท์ตัวอย่าง (ยังไม่ได้ตั้งค่า Sheet ID)');await sleep(800);return FALLBACK_VOCAB;}
+  const name=encodeURIComponent(CONFIG.SHEET_NAME.trim());
+  // Google Sheets gviz endpoint — ต้องเปิดแชร์ Sheets เป็น "Anyone with the link" ก่อน
   const url=`https://docs.google.com/spreadsheets/d/${id}/gviz/tq?tqx=out:json&sheet=${name}`;
   setMsg('กำลังเชื่อมต่อ Google Sheets...');
-  const res=await fetch(url);if(!res.ok)throw new Error('HTTP '+res.status);
+  let res;
+  try{
+    res=await fetch(url,{mode:'cors'});
+  }catch(e){
+    // Network error หรือ CORS — ลอง no-cors แล้ว fallback
+    console.warn('fetch error:',e);
+    throw new Error('เชื่อมต่อไม่ได้ (CORS/Network)\n\nตรวจสอบ:\n1. เปิดแชร์ Sheets เป็น "Anyone with the link"\n2. Sheet ID ถูกต้องไหม\n3. อินเทอร์เน็ตใช้งานได้ไหม');
+  }
+  if(!res.ok)throw new Error(`HTTP ${res.status} — Sheet ID อาจผิด หรือยังไม่ได้เปิดแชร์`);
   const text=await res.text();
-  const json=JSON.parse(text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\)/)[1]);
+  // Google returns JSONP wrapper
+  const match=text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\)/);
+  if(!match){
+    // อาจเป็น HTML error page (Sheet ไม่ได้แชร์ หรือ ID ผิด)
+    if(text.includes('signin')||text.includes('accounts.google')){
+      throw new Error('Sheets ไม่ได้เปิดแชร์ต่อสาธารณะ\n\nวิธีแก้: Share → "Anyone with the link" → Viewer');
+    }
+    if(text.includes('does not exist')||text.includes('No such')){
+      throw new Error('ไม่พบ Sheet ชื่อ "'+CONFIG.SHEET_NAME+'"\n\nตรวจสอบว่าแท็บชื่อ vocab (ตัวเล็ก)');
+    }
+    throw new Error('รูปแบบข้อมูลไม่ถูกต้อง (Sheets อาจไม่ได้แชร์)');
+  }
+  const json=JSON.parse(match[1]);
   const cols=json.table.cols.map(c=>c.label.toLowerCase().trim());
   const idx={word:cols.indexOf('word'),meaning:cols.indexOf('meaning'),phonetic:cols.indexOf('phonetic'),audio:cols.indexOf('audio'),image:cols.indexOf('image'),emoji:cols.indexOf('emoji'),category:cols.indexOf('category'),chapter:cols.indexOf('chapter'),chapterName:cols.indexOf('chaptername'),example:cols.indexOf('example')};
   const data=json.table.rows.map(r=>({
@@ -1198,6 +1388,13 @@ function setMsg(m){document.getElementById('loadMsg').textContent=m;}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
 /* ═══ INIT ═══ */
+function useFallback(){
+  vocab=FALLBACK_VOCAB;buildChapters(vocab);
+  if(window.speechSynthesis){speechSynthesis.getVoices();}
+  show('sLogin');
+  document.getElementById('loginPass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+}
+
 async function init(){
   loadDB();
   // ensure teacher user always exists
@@ -1208,7 +1405,23 @@ async function init(){
     if(window.speechSynthesis){speechSynthesis.getVoices();speechSynthesis.onvoiceschanged=()=>{};}
     await sleep(200);show('sLogin');
     document.getElementById('loginPass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-  }catch(err){setMsg('❌ '+err.message);console.error(err);}
+  }catch(err){
+    console.error(err);
+    document.getElementById('sLoading').innerHTML=`
+      <div style="max-width:340px;text-align:center;padding:20px">
+        <div style="font-size:48px;margin-bottom:16px">&#x26A0;&#xFE0F;</div>
+        <h2 style="font-family:Oswald,sans-serif;color:#FFD700;font-size:20px;letter-spacing:2px;margin-bottom:12px">&#x274C; โหลดข้อมูลไม่ได้</h2>
+        <div style="background:rgba(255,65,54,.12);border:1px solid rgba(255,65,54,.3);border-radius:12px;padding:14px;font-size:13px;color:rgba(255,255,255,.85);line-height:1.8;text-align:left;margin-bottom:14px;white-space:pre-line">${err.message}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.35);margin-bottom:16px">Sheet ID ที่ใช้: <span style="color:#FFD700">${CONFIG.SHEET_ID||'(ยังไม่ได้ตั้งค่า)'}</span></div>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+          <button onclick="location.reload()" style="background:linear-gradient(135deg,#FFD700,#FFA500);color:#0a0a1a;border:none;padding:11px 22px;border-radius:50px;font-family:Oswald,sans-serif;font-size:14px;font-weight:700;letter-spacing:1px;cursor:pointer">Retry</button>
+          <button onclick="useFallback()" style="background:transparent;border:1.5px solid rgba(255,215,0,.4);color:#FFD700;padding:11px 22px;border-radius:50px;font-family:Oswald,sans-serif;font-size:14px;cursor:pointer">ใช้คำตัวอย่างแทน</button>
+        </div>
+        <p style="margin-top:16px;font-size:12px;color:rgba(255,255,255,.4);line-height:1.6">
+          วิธีแก้: เปิด Google Sheets &#8594; Share &#8594; <b style="color:#FFD700">"Anyone with the link"</b>
+        </p>
+      </div>`;
+  }
 }
 init();
 </script>
