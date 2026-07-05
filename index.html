@@ -713,12 +713,13 @@ async function api(action, body={}) {
     return localFallback(action, body);
   }
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({action, ...body})
-    });
-    return await res.json();
+    // ส่งแบบ GET + payload param — วิธีนี้ Apps Script รับได้ชัวร์ ไม่มีปัญหา CORS
+    const payload = JSON.stringify({action, ...body});
+    const fullUrl = url + "?payload=" + encodeURIComponent(payload);
+    const res = await fetch(fullUrl, {redirect: "follow"});
+    const text = await res.text();
+    try { return JSON.parse(text); }
+    catch(e) { return {ok:false, msg:"Parse error: "+text.slice(0,200)}; }
   } catch(e) {
     console.warn("API error:", e);
     return {ok:false, msg:"เชื่อมต่อ server ไม่ได้: "+e.message};
